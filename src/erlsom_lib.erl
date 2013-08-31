@@ -92,17 +92,18 @@ convertPCData(Text, Type, Namespaces, NamespaceMapping) ->
     qname ->
       %% qname has form prefix:localname (or, if there is no prefix: localname)
       %% split the two parts, look up the prefix to find the uri, and put it into 
-      %% a qname record {localname, URI, prefix} (URI = undefined if there was no prefix)
+      %% a #qname{} record (URI = undefined if there was no prefix)
       {Prefix, LocalName} = splitOnColon(Text),
-      case lists:keysearch(Prefix, 3, Namespaces) of
+      case lists:keysearch(Prefix, #ns.prefix, Namespaces) of
         {value, #ns{uri = URI}} ->
           %% this is namespace qualified - now see whether a mapping applies
           case lists:keysearch(URI, 2, NamespaceMapping) of
             {value, #ns{prefix = MappedPrefix}}  ->
-              #qname{localPart = LocalName, uri = URI, prefix = Prefix, mappedPrefix = MappedPrefix};
-            _Else ->
-              #qname{localPart = LocalName, uri = URI, prefix = Prefix, mappedPrefix = Prefix}
-          end;
+                  ok; % Bind MappedPrefix
+              false ->
+                  MappedPrefix = undefined
+          end,
+           #qname{localPart = LocalName, uri = URI, prefix = Prefix, mappedPrefix = MappedPrefix};
         _Else ->
           if 
             Prefix == [] -> %% no prefix, no default namespace
