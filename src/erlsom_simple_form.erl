@@ -26,20 +26,29 @@
 -export([callback/2]).
 
 -include("erlsom_sax.hrl").
+-include("erlsom.hrl").
 
--record(sState, {stack, nameFun, options}).
+-record(sState, {stack, nsMapping, nameFun, qnamePred, options}).
 
 scan(Xml, Options) ->
   case lists:keysearch('nameFun', 1, Options) of
-    {value, {_, Fun}} ->
+    {value, {_, NameFun}} ->
       Options2 = lists:keydelete('nameFun', 1, Options);
     _ -> 
-      Fun = fun nameFun/3,
+      NameFun = fun nameFun/3,
       Options2 = Options
   end,
-  erlsom:parse_sax(Xml, 
-    #sState{stack = [], nameFun = Fun},
-    fun callback/2, Options2).
+  case lists:keysearch('qnamePredicate', 1, Options2) of
+    {value, {_, QNamePred}} ->
+      Options3 = lists:keydelete('qnamePredicate', 1, Options2);
+    _ ->
+      QNamePred = undefined,
+      Options3 = Options2
+  end,
+  erlsom:parse_sax(Xml,
+    #sState{stack = [], nsMapping = [],
+            nameFun = NameFun, qnamePred = QNamePred},
+    fun callback/2, Options3).
 
 %% It is also possible to call erlsom_simple_form:callback from within
 %% another callback function (to parse a part of an xml document).
@@ -69,10 +78,12 @@ callback(Event, State) ->
         characters(Event, State);
       {ignorableWhitespace, _Characters} -> State;
       {processingInstruction, _Target, _Data} ->  State;
-      {startPrefixMapping, _Prefix, _URI} -> 
-        State;
-      {endPrefixMapping, _Prefix} ->
-        State;
+      {startPrefixMapping, Prefix, URI} -> 
+            #sState{nsMapping=NSMap} = State,
+            State#sState{nsMapping = [#ns{prefix=Prefix,uri=URI} | NSMap]};
+      {endPrefixMapping, Prefix} ->
+            #sState{nsMapping=NSMap} = State,
+            State#sState{nsMapping = lists:keydelete(Prefix,#ns.prefix,NSMap)};
       endDocument -> 
         case State of 
           #sState{stack = [Root]} ->
@@ -119,7 +130,7 @@ callback(Event, State) ->
 startElement({startElement, Uri, LocalName, Prefix, Attributes}, 
              State = #sState{stack = Stack, nameFun = NameFun}) ->
   Name = NameFun(LocalName, Uri, Prefix),
-  State#sState{stack = [{Name, processAttributes(Attributes, State), []} | Stack]}.
+  State#sState{stack = [{Name, processAttributes(Attributes, Name, State), []} | Stack]}.
 
 endElement({endElement, _Uri, _LocalName, _Prefix},
            State = #sState{stack = [{Name, Attributes, Elements}]}) ->
@@ -150,14 +161,30 @@ characters({characters, Characters},
            State = #sState{stack = [{Name, Attributes, Elements} | Tail]}) ->
   State#sState{stack = [{Name, Attributes, [Characters | Elements]} | Tail]}.
 
-processAttributes(Attributes, State) ->
-  processAttributes(Attributes, State, []).
-processAttributes([], _State, Acc) ->
+processAttributes(Attributes, ElemName, State) ->
+  processAttributes(Attributes, ElemName, State, []).
+processAttributes([], _ElemName, _State, Acc) ->
   lists:reverse(Acc);
-processAttributes([#attribute{localName=LocalName, uri=Uri, prefix = Prefix, value=Value} | Tail], 
-                  State = #sState{nameFun = NameFun},
+processAttributes([#attribute{localName=LocalName, uri=Uri, prefix = Prefix, value=Value} | Tail],
+                  ElemName,
+                  State = #sState{nameFun = NameFun, qnamePred = QNamePred},
                   Acc) ->
-  processAttributes(Tail, State, [{NameFun(LocalName, Uri, Prefix), Value} | Acc]).
+  AttrName = NameFun(LocalName, Uri, Prefix),
+  AttrValue = case (QNamePred /= undefined) andalso
+                  QNamePred({attribute, ElemName, AttrName})
+              of
+                  true -> convert_qname(Value, State);
+                  false -> Value
+              end,
+  processAttributes(Tail, ElemName, State, [{AttrName, AttrValue} | Acc]).
+
+convert_qname(Value, #sState{nsMapping=NSMapping, nameFun=NameFun}) ->
+  case erlsom_lib:convertPCData(Value, qname, NSMapping, []) of
+    #qname{uri=AVURI, localPart=AVName, prefix=AVPrefix} ->
+      NameFun(AVName, AVURI, AVPrefix);
+    _ ->
+      Value
+  end.
 
 nameFun(Name, [], _Prefix) ->
   Name;
